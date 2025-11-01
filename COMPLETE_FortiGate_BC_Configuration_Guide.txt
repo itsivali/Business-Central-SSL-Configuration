@@ -1,0 +1,771 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    COMPLETE FORTIGATE & BUSINESS CENTRAL                    ║
+║                         CONFIGURATION GUIDE                                 ║
+║                         All-in-One Document                                 ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════════════════
+TABLE OF CONTENTS
+═══════════════════════════════════════════════════════════════════════════
+
+SECTION 1:  Quick Reference (Configuration Summary)
+SECTION 2:  Discovery - Find Your Existing FortiGate Config
+SECTION 3:  Update Existing FortiGate VIP and Policy
+SECTION 4:  Create New FortiGate VIP and Policy (if nothing exists)
+SECTION 5:  Business Central PowerShell Configuration
+SECTION 6:  Verification and Testing
+SECTION 7:  Troubleshooting Guide
+SECTION 8:  Network Architecture
+SECTION 9:  M-Pesa Integration
+
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 1: QUICK REFERENCE
+═══════════════════════════════════════════════════════════════════════════
+
+CONFIGURATION SUMMARY
+────────────────────────────────────────────────────────────────────────────
+Internal Server IP:     192.168.100.202:7349
+Public IP Address:      197.248.119.149:8443  
+Domain Name:            kasuku.jaza.ke
+SSL Certificate:        *.jaza.ke (wildcard)
+Certificate Thumbprint: F248F0E535EB1FE918B8CD1AC424DC0B2D9243AF
+FortiGate VIP Name:     VIP-BC-HTTPS-8443 (or your existing name)
+Service Instance:       BC260_NUP
+
+ACCESS URLS
+────────────────────────────────────────────────────────────────────────────
+Internal (LAN):         https://192.168.100.202:7349/BC260_NUP/
+External (Internet):    https://kasuku.jaza.ke:8443/BC260_NUP/
+M-Pesa Callback:        https://kasuku.jaza.ke:8443/BC260_NUP/api/mpesa/callback
+
+PORT MAPPING
+────────────────────────────────────────────────────────────────────────────
+Internet → 197.248.119.149:8443 → FortiGate VIP → 192.168.100.202:7349 → BC
+
+DECISION: DO YOU HAVE EXISTING FORTIGATE CONFIG?
+────────────────────────────────────────────────────────────────────────────
+□ YES - I have VIPs/Policies → Go to SECTION 3 (Update Existing)
+□ NO - Fresh setup → Go to SECTION 4 (Create New)
+□ DON'T KNOW → Go to SECTION 2 (Discovery)
+
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 2: DISCOVERY - FIND YOUR EXISTING CONFIGURATION
+═══════════════════════════════════════════════════════════════════════════
+
+Run these commands on FortiGate to find what you have:
+
+FIND ALL VIPs
+────────────────────────────────────────────────────────────────────────────
+show firewall vip
+get firewall vip
+
+Look for VIPs with:
+- extip: 197.248.119.149
+- mappedip: 192.168.100.202
+- Any BC/Business Central related names
+
+SEARCH BY IP ADDRESS
+────────────────────────────────────────────────────────────────────────────
+show firewall vip | grep -B 2 -A 10 "197.248.119.149"
+show firewall vip | grep -B 2 -A 10 "192.168.100.202"
+
+SEARCH BY PORT
+────────────────────────────────────────────────────────────────────────────
+show firewall vip | grep -B 2 -A 10 "8443"
+show firewall vip | grep -B 2 -A 10 "7349"
+
+SEARCH BY NAME
+────────────────────────────────────────────────────────────────────────────
+show firewall vip | grep -i "business"
+show firewall vip | grep -i "bc"
+show firewall vip | grep -i "nav"
+
+FIND ALL POLICIES
+────────────────────────────────────────────────────────────────────────────
+get firewall policy
+show firewall policy | grep -B 5 -A 15 "192.168.100.202"
+
+DOCUMENT YOUR FINDINGS
+────────────────────────────────────────────────────────────────────────────
+My VIP Name:        _________________________________
+My Policy ID:       _________________________________
+
+If you found existing VIP/Policy → Go to SECTION 3
+If nothing found → Go to SECTION 4
+
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 3: UPDATE EXISTING FORTIGATE CONFIGURATION
+═══════════════════════════════════════════════════════════════════════════
+
+Use this section if you found existing VIP and Policy in SECTION 2.
+
+BACKUP FIRST (CRITICAL)
+────────────────────────────────────────────────────────────────────────────
+execute backup config management-station bc-backup-before-update.conf
+
+UPDATE EXISTING VIP
+────────────────────────────────────────────────────────────────────────────
+Replace <YOUR-VIP-NAME> with the name you found in Section 2:
+
+config firewall vip
+    edit "<YOUR-VIP-NAME>"
+        set comment "Business Central HTTPS - kasuku.jaza.ke - Updated"
+        set extip 197.248.119.149
+        set extintf "wan1"
+        set portforward enable
+        set mappedip 192.168.100.202
+        set extport 8443
+        set mappedport 7349
+        set protocol tcp
+    next
+end
+
+VERIFY VIP UPDATE
+────────────────────────────────────────────────────────────────────────────
+get firewall vip <YOUR-VIP-NAME>
+diagnose firewall vip list <YOUR-VIP-NAME>
+
+UPDATE EXISTING POLICY
+────────────────────────────────────────────────────────────────────────────
+Replace <YOUR-POLICY-ID> with the ID you found in Section 2:
+Replace <YOUR-VIP-NAME> with your VIP name:
+
+config firewall policy
+    edit <YOUR-POLICY-ID>
+        set name "WAN-to-BC-Server-HTTPS"
+        set comment "Business Central HTTPS access - Updated"
+        set srcintf "wan1"
+        set dstintf "internal"
+        set srcaddr "all"
+        set dstaddr "<YOUR-VIP-NAME>"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+        set nat enable
+        set status enable
+    next
+end
+
+VERIFY POLICY UPDATE
+────────────────────────────────────────────────────────────────────────────
+get firewall policy <YOUR-POLICY-ID>
+
+EXAMPLE: If VIP is "BC-VIP" and Policy ID is 25
+────────────────────────────────────────────────────────────────────────────
+config firewall vip
+    edit "BC-VIP"
+        set extip 197.248.119.149
+        set extport 8443
+        set mappedip 192.168.100.202
+        set mappedport 7349
+        set portforward enable
+    next
+end
+
+config firewall policy
+    edit 25
+        set dstaddr "BC-VIP"
+        set nat enable
+        set status enable
+    next
+end
+
+After updating, go to SECTION 6 for testing.
+
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 4: CREATE NEW FORTIGATE CONFIGURATION
+═══════════════════════════════════════════════════════════════════════════
+
+Use this section if you have NO existing VIP/Policy (fresh setup).
+
+BACKUP FIRST (CRITICAL)
+────────────────────────────────────────────────────────────────────────────
+execute backup config management-station bc-backup-before-create.conf
+
+CREATE NEW VIP
+────────────────────────────────────────────────────────────────────────────
+config firewall vip
+    edit "VIP-BC-HTTPS-8443"
+        set comment "Business Central HTTPS - kasuku.jaza.ke"
+        set extip 197.248.119.149
+        set extintf "wan1"
+        set portforward enable
+        set mappedip 192.168.100.202
+        set extport 8443
+        set mappedport 7349
+        set protocol tcp
+    next
+end
+
+VERIFY VIP CREATION
+────────────────────────────────────────────────────────────────────────────
+get firewall vip VIP-BC-HTTPS-8443
+diagnose firewall vip list VIP-BC-HTTPS-8443
+
+CREATE NEW POLICY
+────────────────────────────────────────────────────────────────────────────
+config firewall policy
+    edit 0
+        set name "WAN-to-BC-Server-HTTPS"
+        set comment "Allow external HTTPS access to Business Central"
+        set srcintf "wan1"
+        set dstintf "internal"
+        set srcaddr "all"
+        set dstaddr "VIP-BC-HTTPS-8443"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+        set nat enable
+        set status enable
+    next
+end
+
+VERIFY POLICY CREATION
+────────────────────────────────────────────────────────────────────────────
+get firewall policy
+
+Note the Policy ID that was assigned, then:
+get firewall policy <POLICY-ID>
+
+After creating, go to SECTION 6 for testing.
+
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 5: BUSINESS CENTRAL POWERSHELL CONFIGURATION
+═══════════════════════════════════════════════════════════════════════════
+
+Run this PowerShell script on the BC Server as Administrator.
+This configures BC to use HTTPS on port 7349.
+
+SAVE THIS AS: BC260_NUP_SSL_Config.ps1
+────────────────────────────────────────────────────────────────────────────
+
+#Requires -RunAsAdministrator
+
+$ServiceInstance = "BC260_NUP"
+$Port = 7349
+$CertThumbprint = "F248F0E535EB1FE918B8CD1AC424DC0B2D9243AF"
+$ServerIP = "192.168.100.202"
+$PublicIP = "197.248.119.149"
+
+Write-Host "Configuring Business Central for HTTPS..." -ForegroundColor Cyan
+
+# Import BC module
+Import-Module 'C:\Program Files\Microsoft Dynamics 365 Business Central\260\Service\Microsoft.Dynamics.Nav.Management.psm1'
+
+# Stop service
+$ServiceName = "MicrosoftDynamicsNavServer`$$ServiceInstance"
+Stop-Service $ServiceName -Force
+Start-Sleep -Seconds 5
+
+# Clean HTTP.SYS bindings
+netsh http delete sslcert ipport=0.0.0.0:$Port 2>&1 | Out-Null
+netsh http delete sslcert ipport=[::]:$Port 2>&1 | Out-Null
+
+$UrlPatterns = @(
+    "http://+:$Port/", "https://+:$Port/",
+    "http://+:$Port/BC260_NUP/", "https://+:$Port/BC260_NUP/"
+)
+foreach ($url in $UrlPatterns) {
+    netsh http delete urlacl url=$url 2>&1 | Out-Null
+}
+
+# Configure BC
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ServicesCertificateThumbprint" -KeyValue $CertThumbprint -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ClientServicesPort" -KeyValue $Port -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "SOAPServicesPort" -KeyValue $Port -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ODataServicesPort" -KeyValue $Port -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "DeveloperServicesPort" -KeyValue $Port -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ClientServicesSSLEnabled" -KeyValue $true -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "SOAPServicesSSLEnabled" -KeyValue $true -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ODataServicesSSLEnabled" -KeyValue $true -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "DeveloperServicesSSLEnabled" -KeyValue $true -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "PublicODataBaseUrl" -KeyValue "https://kasuku.jaza.ke:8443" -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "PublicSOAPBaseUrl" -KeyValue "https://kasuku.jaza.ke:8443" -ApplyTo ConfigFile
+Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "PublicWebBaseUrl" -KeyValue "https://kasuku.jaza.ke:8443" -ApplyTo ConfigFile
+
+# Configure firewall
+Remove-NetFirewallRule -DisplayName "BC HTTPS $Port*" -ErrorAction SilentlyContinue
+New-NetFirewallRule -DisplayName "BC HTTPS $Port - $ServiceInstance" `
+    -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow `
+    -Profile Domain,Private,Public -Enabled True | Out-Null
+
+# Start service
+Start-Service $ServiceName
+Start-Sleep -Seconds 25
+
+Write-Host "Configuration complete!" -ForegroundColor Green
+Write-Host "Test: https://localhost:$Port/BC260_NUP/" -ForegroundColor Yellow
+
+────────────────────────────────────────────────────────────────────────────
+END OF POWERSHELL SCRIPT
+────────────────────────────────────────────────────────────────────────────
+
+RUN THE SCRIPT
+────────────────────────────────────────────────────────────────────────────
+1. Save the above as: BC260_NUP_SSL_Config.ps1
+2. Open PowerShell as Administrator
+3. Run: .\BC260_NUP_SSL_Config.ps1
+
+VERIFY BC CONFIGURATION
+────────────────────────────────────────────────────────────────────────────
+Get-Service MicrosoftDynamicsNavServer$BC260_NUP
+netstat -ano | findstr :7349
+Start-Process "https://localhost:7349/BC260_NUP/"
+
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 6: VERIFICATION AND TESTING
+═══════════════════════════════════════════════════════════════════════════
+
+FORTIGATE VERIFICATION
+────────────────────────────────────────────────────────────────────────────
+# Check VIP status
+get firewall vip <VIP-NAME>
+diagnose firewall vip list <VIP-NAME>
+
+# Check policy status
+get firewall policy <POLICY-ID>
+
+# Monitor live sessions
+diagnose sys session filter dst 192.168.100.202
+diagnose sys session filter dport 7349
+diagnose sys session list
+
+# Real-time traffic monitoring
+diagnose sniffer packet wan1 'port 8443' 4
+
+BC SERVER VERIFICATION
+────────────────────────────────────────────────────────────────────────────
+# PowerShell commands:
+Get-Service MicrosoftDynamicsNavServer$BC260_NUP
+netstat -ano | findstr :7349
+Get-EventLog -LogName Application -Source MicrosoftDynamicsNavServer* -Newest 5
+
+INTERNAL NETWORK TESTING
+────────────────────────────────────────────────────────────────────────────
+Test 1: Direct IP access from LAN
+URL: https://192.168.100.202:7349/BC260_NUP/
+Expected: Works (may show certificate warning - this is NORMAL)
+
+Test 2: Domain access from LAN (requires hosts file)
+Add to C:\Windows\System32\drivers\etc\hosts:
+197.248.119.149    kasuku.jaza.ke
+
+URL: https://kasuku.jaza.ke:7349/BC260_NUP/
+Expected: Works with no certificate warnings
+
+EXTERNAL NETWORK TESTING
+────────────────────────────────────────────────────────────────────────────
+Test 3: Port connectivity from internet
+telnet kasuku.jaza.ke 8443
+# OR
+nc -zv kasuku.jaza.ke 8443
+Expected: Connection established
+
+Test 4: HTTPS access from internet
+curl -v https://kasuku.jaza.ke:8443/BC260_NUP/
+Expected: SSL handshake successful, HTTP response received
+
+Test 5: Browser test from internet
+URL: https://kasuku.jaza.ke:8443/BC260_NUP/
+Expected: BC login page, green padlock, no certificate warnings
+
+FORTIGATE LOG CHECKING
+────────────────────────────────────────────────────────────────────────────
+execute log filter category traffic
+execute log display
+
+Look for:
+- Traffic from external IPs to 197.248.119.149:8443
+- NAT translations to 192.168.100.202:7349
+- Accept actions (not deny/drop)
+
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 7: TROUBLESHOOTING GUIDE
+═══════════════════════════════════════════════════════════════════════════
+
+PROBLEM: Cannot connect from external network
+────────────────────────────────────────────────────────────────────────────
+Diagnosis:
+1. Verify DNS resolution:
+   nslookup kasuku.jaza.ke
+   (Should return: 197.248.119.149)
+
+2. Test port connectivity:
+   telnet kasuku.jaza.ke 8443
+
+3. Check FortiGate VIP:
+   get firewall vip <VIP-NAME>
+   (Verify extip, extport, mappedip, mappedport are correct)
+
+4. Check FortiGate policy:
+   get firewall policy <POLICY-ID>
+   (Verify status is enabled, NAT is enabled)
+
+5. Enable FortiGate debugging:
+   diagnose debug reset
+   diagnose debug flow filter addr 197.248.119.149
+   diagnose debug flow filter port 8443
+   diagnose debug flow show console enable
+   diagnose debug enable
+   diagnose debug flow trace start 100
+   
+   (Try connection, watch output)
+   
+   diagnose debug disable
+   diagnose debug reset
+
+PROBLEM: Certificate errors when accessing via IP
+────────────────────────────────────────────────────────────────────────────
+If accessing via: https://192.168.100.202:7349/BC260_NUP/
+Status: THIS IS NORMAL AND EXPECTED
+
+Reason: Certificate is for *.jaza.ke (domain), not IP address
+Action: Click "Advanced" → "Continue" in browser
+For production: Use https://kasuku.jaza.ke:8443/BC260_NUP/ instead
+
+If accessing via: https://kasuku.jaza.ke:8443/BC260_NUP/
+Status: THIS IS NOT NORMAL
+
+Check:
+1. Certificate installed on BC server:
+   Get-ChildItem Cert:\LocalMachine\My | Where {$_.Thumbprint -eq "F248F0E535EB1FE918B8CD1AC424DC0B2D9243AF"}
+
+2. Certificate has private key:
+   $cert.HasPrivateKey should be True
+
+3. Certificate not expired:
+   $cert.NotAfter should be future date
+
+PROBLEM: BC Service won't start
+────────────────────────────────────────────────────────────────────────────
+Check event log:
+Get-EventLog -LogName Application -Source MicrosoftDynamicsNavServer* -Newest 10
+
+Common errors:
+- "URL already registered": Run cleanup commands from Section 5
+- "Certificate not found": Verify thumbprint is correct
+- "Port already in use": Check for conflicting services on port 7349
+
+Manual cleanup if needed:
+netsh http delete sslcert ipport=0.0.0.0:7349
+netsh http delete urlacl url=https://+:7349/BC260_NUP/
+
+PROBLEM: FortiGate policy not matching traffic
+────────────────────────────────────────────────────────────────────────────
+Check:
+1. Policy order (might be blocked by earlier rule):
+   get firewall policy
+   (Look for policy that might match before your BC policy)
+
+2. Policy hit count:
+   get firewall policy <POLICY-ID>
+   (Look at "packets" counter - should increase)
+
+3. Source/destination interfaces:
+   srcintf should be "wan1"
+   dstintf should be "internal"
+
+4. NAT enabled:
+   nat should be "enable"
+
+PROBLEM: M-Pesa callbacks not received
+────────────────────────────────────────────────────────────────────────────
+Check:
+1. M-Pesa callback URL is correct:
+   https://kasuku.jaza.ke:8443/BC260_NUP/api/mpesa/callback
+
+2. FortiGate logs for M-Pesa IPs:
+   execute log filter field subtype forward
+   execute log display
+
+3. BC API endpoint responding:
+   curl -X POST https://kasuku.jaza.ke:8443/BC260_NUP/api/mpesa/callback \
+        -H "Content-Type: application/json" \
+        -d '{"test":"data"}'
+
+4. BC event logs for API calls:
+   Get-EventLog -LogName Application -Source MicrosoftDynamicsNavServer*
+
+PROBLEM: Traffic reaches BC but no response
+────────────────────────────────────────────────────────────────────────────
+Check:
+1. BC service is running:
+   Get-Service MicrosoftDynamicsNavServer$BC260_NUP
+
+2. BC is listening on correct port:
+   netstat -ano | findstr :7349
+
+3. Windows firewall allows port 7349:
+   Get-NetFirewallRule -DisplayName "*BC HTTPS*"
+
+4. Check BC event log for errors
+
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 8: NETWORK ARCHITECTURE
+═══════════════════════════════════════════════════════════════════════════
+
+TRAFFIC FLOW DIAGRAM
+────────────────────────────────────────────────────────────────────────────
+
+Internet User / M-Pesa
+        |
+        | HTTPS Request: kasuku.jaza.ke:8443
+        ↓
+    DNS Resolution
+        | kasuku.jaza.ke → 197.248.119.149
+        ↓
+FortiGate WAN Interface
+        | Public IP: 197.248.119.149:8443
+        ↓
+    VIP Translation
+        | Translates: 197.248.119.149:8443 → 192.168.100.202:7349
+        ↓
+    Firewall Policy
+        | Action: ACCEPT
+        | NAT: Enabled
+        | Logging: Enabled
+        ↓
+FortiGate LAN Interface
+        | To: 192.168.100.202:7349
+        ↓
+Business Central Server
+        | Internal IP: 192.168.100.202
+        | Port: 7349
+        | SSL Termination: BC handles SSL/TLS
+        | Process request → Generate response
+        ↓
+Response flows back (reverse path)
+
+NETWORK COMPONENTS
+────────────────────────────────────────────────────────────────────────────
+Component                Value                           Purpose
+─────────────────────   ───────────────────────────     ──────────────────
+Public IP                197.248.119.149                Internet address
+Public Port              8443                           External HTTPS port
+FortiGate VIP            Port Forwarding (DNAT)         NAT translation
+Internal IP              192.168.100.202                BC Server LAN IP
+Internal Port            7349                           BC HTTPS port
+Domain                   kasuku.jaza.ke                 Public FQDN
+SSL Certificate          *.jaza.ke                      Wildcard cert
+Protocol                 HTTPS/TCP                      Encrypted HTTP
+
+SECURITY LAYERS
+────────────────────────────────────────────────────────────────────────────
+Layer 1: FortiGate Firewall
+  - Stateful packet inspection
+  - VIP/NAT translation
+  - Traffic logging
+  - DDoS protection (optional)
+
+Layer 2: SSL/TLS Encryption
+  - Certificate: *.jaza.ke
+  - Managed by BC Server
+  - End-to-end encryption
+  - FortiGate pass-through (does NOT decrypt)
+
+Layer 3: BC Authentication
+  - User authentication
+  - API authentication
+  - Session management
+  - Authorization & permissions
+
+Layer 4: Application Security
+  - Business logic validation
+  - Input sanitization
+  - Rate limiting
+
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 9: M-PESA INTEGRATION
+═══════════════════════════════════════════════════════════════════════════
+
+M-PESA CALLBACK CONFIGURATION
+────────────────────────────────────────────────────────────────────────────
+Update these URLs in M-Pesa Portal:
+
+Callback URL:
+https://kasuku.jaza.ke:8443/BC260_NUP/api/mpesa/callback
+
+Validation URL:
+https://kasuku.jaza.ke:8443/BC260_NUP/api/mpesa/validation
+
+Confirmation URL:
+https://kasuku.jaza.ke:8443/BC260_NUP/api/mpesa/confirmation
+
+M-PESA FLOW
+────────────────────────────────────────────────────────────────────────────
+1. Customer initiates payment (STK Push / Paybill)
+2. M-Pesa processes payment
+3. M-Pesa sends callback to: https://kasuku.jaza.ke:8443/BC260_NUP/api/mpesa/callback
+4. Traffic flows through FortiGate VIP
+5. BC receives callback, validates, updates records
+6. BC sends confirmation back to M-Pesa
+
+TESTING M-PESA INTEGRATION
+────────────────────────────────────────────────────────────────────────────
+1. Initiate test transaction in M-Pesa sandbox
+
+2. Monitor FortiGate for incoming callbacks:
+   diagnose sniffer packet wan1 'port 8443' 4
+
+3. Check BC logs for received callbacks:
+   Get-EventLog -LogName Application -Source MicrosoftDynamicsNavServer$BC260_NUP
+
+4. Verify transaction recorded in BC
+
+5. Confirm response sent back to M-Pesa
+
+SECURITY HARDENING (Optional)
+────────────────────────────────────────────────────────────────────────────
+If M-Pesa provides specific server IPs, restrict access:
+
+config firewall address
+    edit "MPESA-Servers"
+        set subnet <mpesa-ip> 255.255.255.0
+    next
+end
+
+config firewall policy
+    edit <POLICY-ID>
+        set srcaddr "MPESA-Servers"
+    next
+end
+
+
+═══════════════════════════════════════════════════════════════════════════
+ROLLBACK PROCEDURES
+═══════════════════════════════════════════════════════════════════════════
+
+EMERGENCY ROLLBACK (If major issues occur)
+────────────────────────────────────────────────────────────────────────────
+Step 1: Disable FortiGate policy immediately
+config firewall policy
+    edit <POLICY-ID>
+        set status disable
+    next
+end
+
+Step 2: Verify external access blocked
+Test: https://kasuku.jaza.ke:8443/BC260_NUP/
+Expected: Connection refused
+
+Step 3: Verify internal access still works
+Test: https://192.168.100.202:7349/BC260_NUP/
+Expected: Working normally
+
+Step 4: Notify stakeholders
+- Inform M-Pesa team
+- Update status page
+- Inform management
+
+COMPLETE ROLLBACK (If needed)
+────────────────────────────────────────────────────────────────────────────
+1. Delete FortiGate policy:
+   config firewall policy
+       delete <POLICY-ID>
+   end
+
+2. Delete FortiGate VIP:
+   config firewall vip
+       delete "<VIP-NAME>"
+   end
+
+3. Restore from backup:
+   execute restore config management-station <backup-file>
+
+
+═══════════════════════════════════════════════════════════════════════════
+IMPLEMENTATION CHECKLIST
+═══════════════════════════════════════════════════════════════════════════
+
+PRE-IMPLEMENTATION
+────────────────────────────────────────────────────────────────────────────
+□ SSL Certificate installed on BC Server
+□ Certificate has private key
+□ DNS record for kasuku.jaza.ke points to 197.248.119.149
+□ FortiGate admin access available
+□ BC Server admin access available
+□ Backup of BC configuration created
+□ Backup of FortiGate configuration created
+□ Change window scheduled
+□ Rollback plan documented
+
+IMPLEMENTATION
+────────────────────────────────────────────────────────────────────────────
+□ BC Server configured for HTTPS (Section 5)
+□ BC service running on port 7349
+□ Internal access tested (192.168.100.202:7349)
+□ FortiGate VIP created/updated (Section 3 or 4)
+□ FortiGate policy created/updated (Section 3 or 4)
+□ VIP configuration verified
+□ Policy configuration verified
+
+TESTING
+────────────────────────────────────────────────────────────────────────────
+□ Internal IP access works (192.168.100.202:7349)
+□ Internal domain access works (kasuku.jaza.ke:7349)
+□ External port connectivity confirmed (telnet test)
+□ External HTTPS access works (kasuku.jaza.ke:8443)
+□ Certificate valid with no warnings
+□ FortiGate logs show traffic
+□ Policy hit count increasing
+□ BC event log shows no errors
+
+M-PESA INTEGRATION
+────────────────────────────────────────────────────────────────────────────
+□ M-Pesa callback URL updated
+□ Test callback successful
+□ Transaction recorded in BC
+□ End-to-end test passed
+
+POST-IMPLEMENTATION
+────────────────────────────────────────────────────────────────────────────
+□ Documentation updated
+□ Monitoring configured
+□ Team trained
+□ Stakeholders informed
+□ Configuration backed up
+□ Project sign-off obtained
+
+
+═══════════════════════════════════════════════════════════════════════════
+CONTACT INFORMATION
+═══════════════════════════════════════════════════════════════════════════
+
+Technical Contacts:
+────────────────────────────────────────────────────────────────────────────
+BC Administrator:        [Name] - [Email/Phone]
+Network Administrator:   [Name] - [Email/Phone]
+Security Officer:        [Name] - [Email/Phone]
+M-Pesa Support:          [Name] - [Email/Phone]
+
+Vendor Support:
+────────────────────────────────────────────────────────────────────────────
+Microsoft BC Support:    https://support.microsoft.com/
+Fortinet Support:        https://support.fortinet.com/
+
+
+═══════════════════════════════════════════════════════════════════════════
+END OF DOCUMENT
+═══════════════════════════════════════════════════════════════════════════
+
+Document Version: 1.0
+Last Updated: 2025
+Configuration: Business Central 260 (BC260_NUP)
+Purpose: Enable public HTTPS access via FortiGate for M-Pesa integration
+
+This document contains all essential information for configuring Business
+Central for external HTTPS access through FortiGate firewall. All sections
+are complete and ready to use.
+
+═══════════════════════════════════════════════════════════════════════════
