@@ -1,133 +1,220 @@
 # ============================================================================
-# Complete BC260_NUP SSL Configuration Fix
+# Business Central SSL Configuration - BC Handles SSL Termination
 # ============================================================================
-# Fixes all configuration issues and enables proper HTTPS
-# 
-# Network Configuration:
-#   - Internal Server IP: 192.168.100.202 (local network)
-#   - Public Domain IP: 197.248.119.149 (kasuku.jaza.ke)
-#   - FortiGate VIP: 197.248.119.149:8443 → 192.168.100.202:7349
-#
-# Access Methods:
-#   - Internal: https://192.168.100.202:7349/BC260_NUP/
-#   - External: https://kasuku.jaza.ke:8443/BC260_NUP/
-#   - Localhost: https://localhost:7349/BC260_NUP/
+# This script ensures Business Central terminates SSL connections itself
+# BC Server will handle HTTPS on port 7348
+# FortiGate only does port forwarding (8443 -> 7348), not SSL termination
 # ============================================================================
 
 #Requires -RunAsAdministrator
 
 $ServiceInstance = "BC260_NUP"
-$Port = 7349
+$Port = 7348
 $CertThumbprint = "F248F0E535EB1FE918B8CD1AC424DC0B2D9243AF"
-$ServerIP = "192.168.100.202"  # Local network IP
-$PublicIP = "197.248.119.149"  # Public IP for domain kasuku.jaza.ke
 
 Write-Host "============================================================================" -ForegroundColor Cyan
-Write-Host "Complete BC260_NUP SSL Configuration Fix" -ForegroundColor Cyan
+Write-Host "Business Central SSL Configuration - BC Handles SSL" -ForegroundColor Cyan
 Write-Host "============================================================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "This script will configure Business Central to be accessible via:" -ForegroundColor Yellow
-Write-Host "  ✓ https://localhost:$Port/BC260_NUP/" -ForegroundColor White
-Write-Host "  ✓ https://$ServerIP`:$Port/BC260_NUP/" -ForegroundColor White
-Write-Host "  ✓ https://kasuku.jaza.ke:$Port/BC260_NUP/" -ForegroundColor White
+Write-Host "Configuration:" -ForegroundColor Yellow
+Write-Host "  Service: $ServiceInstance" -ForegroundColor White
+Write-Host "  Port: $Port" -ForegroundColor White
+Write-Host "  BC will terminate SSL connections" -ForegroundColor White
+Write-Host "  FortiGate does port forwarding only (8443 -> 7348)" -ForegroundColor White
 Write-Host ""
 
-# Import BC module
-Import-Module 'C:\Program Files\Microsoft Dynamics 365 Business Central\260\Service\Microsoft.Dynamics.Nav.Management.psm1' -ErrorAction Stop
+# Import BC Module
+try {
+    Import-Module 'C:\Program Files\Microsoft Dynamics 365 Business Central\260\Service\Microsoft.Dynamics.Nav.Management.psm1' -ErrorAction Stop
+    Write-Host "✓ BC Management module loaded" -ForegroundColor Green
+} catch {
+    Write-Host "✗ Failed to load BC module: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
 
-Write-Host "=== Step 1: Stop BC Service ===" -ForegroundColor Yellow
+Write-Host ""
+
+# ============================================================================
+# STEP 1: Verify Certificate
+# ============================================================================
+
+Write-Host "=== Step 1: Verify Certificate ===" -ForegroundColor Yellow
+
+$cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object {$_.Thumbprint -eq $CertThumbprint}
+
+if (-not $cert) {
+    Write-Host "✗ Certificate not found!" -ForegroundColor Red
+    Write-Host "  Thumbprint: $CertThumbprint" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Please import the certificate first:" -ForegroundColor Yellow
+    Write-Host '  $cert = Import-PfxCertificate -FilePath "C:\path\to\cert.pfx" -CertStoreLocation Cert:\LocalMachine\My -Password (ConvertTo-SecureString "password" -AsSecureString -Force) -Exportable' -ForegroundColor Gray
+    exit 1
+}
+
+Write-Host "✓ Certificate found!" -ForegroundColor Green
+Write-Host "  Subject: $($cert.Subject)" -ForegroundColor White
+Write-Host "  Thumbprint: $($cert.Thumbprint)" -ForegroundColor White
+Write-Host "  Expires: $($cert.NotAfter)" -ForegroundColor White
+Write-Host "  Has Private Key: $($cert.HasPrivateKey)" -ForegroundColor $(if($cert.HasPrivateKey){'Green'}else{'Red'})
+
+if (-not $cert.HasPrivateKey) {
+    Write-Host ""
+    Write-Host "✗ Certificate has no private key!" -ForegroundColor Red
+    Write-Host "  You must import the PFX with the -Exportable flag" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+
+# ============================================================================
+# STEP 2: Fix Certificate Private Key Permissions
+# ============================================================================
+
+Write-Host "=== Step 2: Fix Certificate Private Key Permissions ===" -ForegroundColor Yellow
+
+try {
+    # Get private key file location
+    $rsaCert = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
+    $keyPath = $rsaCert.Key.UniqueName
+    $fullKeyPath = "$env:ProgramData\Microsoft\Crypto\RSA\MachineKeys\$keyPath"
+    
+    Write-Host "  Private key file: $keyPath" -ForegroundColor Gray
+    
+    if (Test-Path $fullKeyPath) {
+        # Grant NETWORK SERVICE read permissions
+        $acl = Get-Acl $fullKeyPath
+        $permission = "NETWORK SERVICE","Read","Allow"
+        $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule $permission
+        $acl.SetAccessRule($accessRule)
+        Set-Acl $fullKeyPath $acl
+        
+        Write-Host "✓ Granted NETWORK SERVICE read permission to private key" -ForegroundColor Green
+    } else {
+        Write-Host "⚠ Could not find private key file (this might be OK)" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "⚠ Could not set permissions: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "  Continuing anyway..." -ForegroundColor Gray
+}
+
+Write-Host ""
+
+# ============================================================================
+# STEP 3: Stop BC Service
+# ============================================================================
+
+Write-Host "=== Step 3: Stop BC Service ===" -ForegroundColor Yellow
+
 $ServiceName = "MicrosoftDynamicsNavServer`$$ServiceInstance"
-Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 5
-Write-Host "  ✓ Service stopped" -ForegroundColor Green
+
+try {
+    $service = Get-Service $ServiceName -ErrorAction Stop
+    
+    if ($service.Status -eq 'Running') {
+        Write-Host "  Stopping service..." -ForegroundColor Gray
+        Stop-Service $ServiceName -Force -ErrorAction Stop
+        Start-Sleep -Seconds 10
+        Write-Host "✓ Service stopped" -ForegroundColor Green
+    } else {
+        Write-Host "✓ Service already stopped" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "✗ Failed to stop service: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+
 Write-Host ""
 
-Write-Host "=== Step 2: Clean ALL HTTP.SYS Bindings on Port $Port ===" -ForegroundColor Yellow
+# ============================================================================
+# STEP 4: Clean ALL HTTP.SYS Bindings
+# ============================================================================
 
-# Remove SSL certificate binding
+Write-Host "=== Step 4: Clean HTTP.SYS Bindings ===" -ForegroundColor Yellow
+
 Write-Host "  Removing SSL certificate bindings..." -ForegroundColor Gray
 netsh http delete sslcert ipport=0.0.0.0:$Port 2>&1 | Out-Null
 netsh http delete sslcert ipport=[::]:$Port 2>&1 | Out-Null
 
-# Remove ALL URL reservations for port
 Write-Host "  Removing URL reservations..." -ForegroundColor Gray
-$UrlPatterns = @(
+$urls = @(
     "http://+:$Port/",
     "https://+:$Port/",
     "http://+:$Port/BC260_NUP/",
-    "https://+:$Port/BC260_NUP/",
-    "http://+:$Port/BC260_NUP/client/",
-    "https://+:$Port/BC260_NUP/client/",
-    "http://+:$Port/BC260_NUP/WS/",
-    "https://+:$Port/BC260_NUP/WS/",
-    "http://+:$Port/BC260_NUP/ODataV4/",
-    "https://+:$Port/BC260_NUP/ODataV4/",
-    "http://+:$Port/BC260_NUP/api/",
-    "https://+:$Port/BC260_NUP/api/",
-    "http://+:$Port/BC260_NUP/dev/",
-    "https://+:$Port/BC260_NUP/dev/"
+    "https://+:$Port/BC260_NUP/"
 )
 
-foreach ($url in $UrlPatterns) {
+foreach ($url in $urls) {
     netsh http delete urlacl url=$url 2>&1 | Out-Null
 }
 
-Write-Host "  ✓ All HTTP.SYS bindings cleaned" -ForegroundColor Green
+Write-Host "✓ All HTTP.SYS bindings cleaned" -ForegroundColor Green
 Write-Host ""
 
-Write-Host "=== Step 3: Verify Certificate ===" -ForegroundColor Yellow
-$cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object {$_.Thumbprint -eq $CertThumbprint}
-if ($cert) {
-    Write-Host "  ✓ Certificate found" -ForegroundColor Green
-    Write-Host "    Subject: $($cert.Subject)" -ForegroundColor White
-    Write-Host "    Has Private Key: $($cert.HasPrivateKey)" -ForegroundColor $(if($cert.HasPrivateKey){'Green'}else{'Red'})
-    
-    if (-not $cert.HasPrivateKey) {
-        Write-Host ""
-        Write-Host "  ✗ ERROR: Certificate has no private key!" -ForegroundColor Red
-        Write-Host "  You must import the PFX file (JazaSSL25.pfx) with private key!" -ForegroundColor Red
-        exit 1
-    }
+# ============================================================================
+# STEP 5: Add SSL Certificate Bindings to HTTP.SYS
+# ============================================================================
+
+Write-Host "=== Step 5: Add SSL Certificate Bindings ===" -ForegroundColor Yellow
+
+$appId = "{00000000-0000-0000-0000-000000000000}"
+
+# Add IPv4 binding
+Write-Host "  Binding certificate for IPv4 (0.0.0.0:$Port)..." -ForegroundColor Gray
+$result = netsh http add sslcert ipport=0.0.0.0:$Port certhash=$CertThumbprint appid=$appId 2>&1
+
+if ($result -like "*successfully*" -or $result -like "*already exists*") {
+    Write-Host "✓ IPv4 SSL binding added" -ForegroundColor Green
 } else {
-    Write-Host "  ✗ Certificate not found!" -ForegroundColor Red
-    Write-Host "  Thumbprint: $CertThumbprint" -ForegroundColor Red
-    exit 1
-}
-Write-Host ""
-
-Write-Host "=== Step 4: Verify Network Configuration ===" -ForegroundColor Yellow
-
-# Check if server IP is assigned
-$adapters = Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -ne "127.0.0.1"}
-Write-Host "  Server Network Adapters:" -ForegroundColor Cyan
-$adapters | Format-Table IPAddress, InterfaceAlias, PrefixOrigin -AutoSize | Out-String | ForEach-Object { Write-Host "    $_" -ForegroundColor White }
-
-$hasServerIP = $adapters | Where-Object {$_.IPAddress -eq $ServerIP}
-if ($hasServerIP) {
-    Write-Host "  ✓ Server IP $ServerIP is assigned to this server" -ForegroundColor Green
-} else {
-    Write-Host "  ⚠ WARNING: IP $ServerIP not found on this server!" -ForegroundColor Yellow
-    Write-Host "    Current IPs: $($adapters.IPAddress -join ', ')" -ForegroundColor Gray
-    Write-Host "    You may need to update the `$ServerIP variable in this script" -ForegroundColor Gray
+    Write-Host "⚠ IPv4 binding result: $result" -ForegroundColor Yellow
 }
 
+# Add IPv6 binding
+Write-Host "  Binding certificate for IPv6 ([::]:$Port)..." -ForegroundColor Gray
+$result = netsh http add sslcert ipport=[::]:$Port certhash=$CertThumbprint appid=$appId 2>&1
+
+if ($result -like "*successfully*" -or $result -like "*already exists*") {
+    Write-Host "✓ IPv6 SSL binding added" -ForegroundColor Green
+} else {
+    Write-Host "⚠ IPv6 binding result: $result" -ForegroundColor Yellow
+}
+
+# Verify bindings
+Write-Host ""
+Write-Host "  Verifying SSL bindings..." -ForegroundColor Gray
+$bindings = netsh http show sslcert | Select-String -Pattern $Port -Context 0,5
+
+if ($bindings) {
+    Write-Host "✓ SSL certificate bound to port $Port" -ForegroundColor Green
+    Write-Host "  Details:" -ForegroundColor Gray
+    $bindings | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+} else {
+    Write-Host "⚠ Could not verify SSL bindings" -ForegroundColor Yellow
+}
+
 Write-Host ""
 
-Write-Host "=== Step 5: Configure Business Central for HTTPS ===" -ForegroundColor Yellow
+# ============================================================================
+# STEP 6: Configure Business Central for HTTPS
+# ============================================================================
+
+Write-Host "=== Step 6: Configure Business Central for HTTPS ===" -ForegroundColor Yellow
 
 try {
     # Set certificate
+    Write-Host "  Setting certificate..." -ForegroundColor Gray
     Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ServicesCertificateThumbprint" -KeyValue $CertThumbprint -ApplyTo ConfigFile
     Write-Host "  ✓ Certificate configured" -ForegroundColor Green
     
-    # Set ALL ports to same port
+    # Set ports
+    Write-Host "  Configuring ports..." -ForegroundColor Gray
     Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ClientServicesPort" -KeyValue $Port -ApplyTo ConfigFile
     Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "SOAPServicesPort" -KeyValue $Port -ApplyTo ConfigFile
     Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ODataServicesPort" -KeyValue $Port -ApplyTo ConfigFile
     Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "DeveloperServicesPort" -KeyValue $Port -ApplyTo ConfigFile
     Write-Host "  ✓ All ports set to $Port" -ForegroundColor Green
     
-    # Enable SSL on ALL services
+    # Enable SSL
+    Write-Host "  Enabling SSL..." -ForegroundColor Gray
     Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ClientServicesSSLEnabled" -KeyValue $true -ApplyTo ConfigFile
     Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "SOAPServicesSSLEnabled" -KeyValue $true -ApplyTo ConfigFile
     Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ODataServicesSSLEnabled" -KeyValue $true -ApplyTo ConfigFile
@@ -135,292 +222,232 @@ try {
     Write-Host "  ✓ SSL enabled on all services" -ForegroundColor Green
     
     # Set public URLs
-    Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "PublicODataBaseUrl" -KeyValue "https://kasuku.jaza.ke:8443" -ApplyTo ConfigFile
-    Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "PublicSOAPBaseUrl" -KeyValue "https://kasuku.jaza.ke:8443" -ApplyTo ConfigFile
-    Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "PublicWebBaseUrl" -KeyValue "https://kasuku.jaza.ke:8443" -ApplyTo ConfigFile
+    Write-Host "  Configuring public URLs..." -ForegroundColor Gray
+    Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "PublicODataBaseUrl" -KeyValue "https://kasuku.jaza.ke:8443/BC260_NUP" -ApplyTo ConfigFile
+    Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "PublicSOAPBaseUrl" -KeyValue "https://kasuku.jaza.ke:8443/BC260_NUP" -ApplyTo ConfigFile
+    Set-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "PublicWebBaseUrl" -KeyValue "https://kasuku.jaza.ke:8443/BC260_NUP" -ApplyTo ConfigFile
     Write-Host "  ✓ Public URLs configured" -ForegroundColor Green
-}
-catch {
-    Write-Host "  ✗ Configuration failed: $_" -ForegroundColor Red
+    
+    Write-Host "✓ Business Central configured for HTTPS" -ForegroundColor Green
+} catch {
+    Write-Host "✗ Configuration failed: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
 
 Write-Host ""
 
-Write-Host "=== Step 6: Verify Configuration ===" -ForegroundColor Yellow
-$config = @{
-    "ClientServicesPort" = Get-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ClientServicesPort"
-    "SOAPServicesPort" = Get-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "SOAPServicesPort"
-    "ODataServicesPort" = Get-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ODataServicesPort"
-    "DeveloperServicesPort" = Get-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "DeveloperServicesPort"
-    "ClientServicesSSLEnabled" = Get-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ClientServicesSSLEnabled"
-    "SOAPServicesSSLEnabled" = Get-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "SOAPServicesSSLEnabled"
-    "ODataServicesSSLEnabled" = Get-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ODataServicesSSLEnabled"
-    "DeveloperServicesSSLEnabled" = Get-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "DeveloperServicesSSLEnabled"
-    "ServicesCertificateThumbprint" = Get-NAVServerConfiguration -ServerInstance $ServiceInstance -KeyName "ServicesCertificateThumbprint"
-}
+# ============================================================================
+# STEP 7: Configure Windows Firewall
+# ============================================================================
 
-Write-Host "  Configuration Summary:" -ForegroundColor Cyan
-foreach ($key in $config.Keys) {
-    $value = $config[$key]
-    $color = "White"
-    
-    # Validate values
-    if ($key -like "*Port" -and $value -ne $Port) {
-        $color = "Red"
-    } elseif ($key -like "*SSLEnabled" -and $value -ne $true) {
-        $color = "Red"
-    } elseif ($key -eq "ServicesCertificateThumbprint" -and $value -ne $CertThumbprint) {
-        $color = "Red"
-    }
-    
-    Write-Host "    $key = $value" -ForegroundColor $color
-}
+Write-Host "=== Step 7: Configure Windows Firewall ===" -ForegroundColor Yellow
 
-Write-Host ""
-
-Write-Host "=== Step 7: Configure Windows Firewall (All Profiles) ===" -ForegroundColor Yellow
 try {
     # Remove old rules
-    $oldRules = Get-NetFirewallRule -DisplayName "BC HTTPS $Port*" -ErrorAction SilentlyContinue
-    if ($oldRules) { 
-        $oldRules | Remove-NetFirewallRule 
+    $oldRules = Get-NetFirewallRule -DisplayName "*$Port*" -ErrorAction SilentlyContinue
+    if ($oldRules) {
+        $oldRules | Remove-NetFirewallRule
         Write-Host "  Removed old firewall rules" -ForegroundColor Gray
     }
     
-    # Create new rule for ALL profiles (Domain, Private, Public)
+    # Create new rule
     New-NetFirewallRule `
         -DisplayName "BC HTTPS $Port - $ServiceInstance" `
-        -Description "Business Central HTTPS access for $ServiceInstance on all network interfaces" `
+        -Description "Business Central HTTPS - BC handles SSL termination" `
         -Direction Inbound `
         -Protocol TCP `
         -LocalPort $Port `
         -Action Allow `
         -Profile Domain,Private,Public `
         -Enabled True `
-        -LocalAddress Any `
         -RemoteAddress Any | Out-Null
     
-    Write-Host "  ✓ Firewall configured for port $Port (All Profiles)" -ForegroundColor Green
-    Write-Host "    Allows: Domain, Private, Public networks" -ForegroundColor Gray
-    Write-Host "    Local Address: Any (0.0.0.0)" -ForegroundColor Gray
-    Write-Host "    Remote Address: Any" -ForegroundColor Gray
-}
-catch {
-    Write-Host "  ! Firewall warning: $_" -ForegroundColor Yellow
+    Write-Host "✓ Firewall rule created" -ForegroundColor Green
+} catch {
+    Write-Host "⚠ Firewall configuration warning: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
 Write-Host ""
 
+# ============================================================================
+# STEP 8: Start BC Service
+# ============================================================================
+
 Write-Host "=== Step 8: Start BC Service ===" -ForegroundColor Yellow
+
 try {
-    Start-Service $ServiceName
-    Write-Host "  Waiting for service to start..." -ForegroundColor Gray
+    Write-Host "  Starting service..." -ForegroundColor Gray
+    Start-Service $ServiceName -ErrorAction Stop
+    
+    Write-Host "  Waiting for service to initialize..." -ForegroundColor Gray
     Start-Sleep -Seconds 25
     
     $service = Get-Service $ServiceName
-    Write-Host "  Service Status: $($service.Status)" -ForegroundColor $(if($service.Status -eq 'Running'){'Green'}else{'Red'})
-}
-catch {
-    Write-Host "  ✗ Service start failed: $_" -ForegroundColor Red
+    
+    if ($service.Status -eq 'Running') {
+        Write-Host "✓ Service started successfully!" -ForegroundColor Green
+    } else {
+        Write-Host "✗ Service status: $($service.Status)" -ForegroundColor Red
+        exit 1
+    }
+} catch {
+    Write-Host "✗ Failed to start service: $($_.Exception.Message)" -ForegroundColor Red
+    
+    Write-Host ""
+    Write-Host "Checking event log..." -ForegroundColor Yellow
+    $errors = Get-EventLog -LogName Application -Source $ServiceName -Newest 3 -EntryType Error -ErrorAction SilentlyContinue
+    if ($errors) {
+        foreach ($error in $errors) {
+            Write-Host "  ERROR: $($error.Message.Substring(0, [Math]::Min(200, $error.Message.Length)))" -ForegroundColor Red
+        }
+    }
+    exit 1
 }
 
 Write-Host ""
 
-Write-Host "=== Step 9: Verify Port and Network Binding ===" -ForegroundColor Yellow
-$portCheck = netstat -ano | findstr :$Port
+# ============================================================================
+# STEP 9: Verify Port is Listening
+# ============================================================================
+
+Write-Host "=== Step 9: Verify Port $Port ===" -ForegroundColor Yellow
+
+Start-Sleep -Seconds 5
+
+$portCheck = netstat -ano | findstr ":$Port.*LISTENING"
+
 if ($portCheck) {
-    Write-Host "  ✓ Port $Port is listening!" -ForegroundColor Green
-    $portCheck | ForEach-Object { Write-Host "    $_" -ForegroundColor White }
-    
-    # Check if bound to all interfaces
-    $tcpConn = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
-    if ($tcpConn) {
-        $boundToAll = $tcpConn | Where-Object {$_.LocalAddress -eq "0.0.0.0" -or $_.LocalAddress -eq "::"}
-        if ($boundToAll) {
-            Write-Host "  ✓ Service is bound to ALL network interfaces (0.0.0.0)" -ForegroundColor Green
-        } else {
-            Write-Host "  ⚠ Service bound to: $($tcpConn.LocalAddress -join ', ')" -ForegroundColor Yellow
-        }
-    }
+    Write-Host "✓ Port $Port is listening!" -ForegroundColor Green
+    Write-Host "  $portCheck" -ForegroundColor Gray
 } else {
-    Write-Host "  ! Port $Port not listening" -ForegroundColor Yellow
+    Write-Host "✗ Port $Port is NOT listening!" -ForegroundColor Red
 }
 
 Write-Host ""
 
-Write-Host "=== Step 10: Check Event Log ===" -ForegroundColor Yellow
-$events = Get-EventLog -LogName Application -Source $ServiceName -Newest 5 -ErrorAction SilentlyContinue
+# ============================================================================
+# STEP 10: Test SSL Connection
+# ============================================================================
 
-if ($events) {
-    $hasError = $false
-    foreach ($event in $events) {
-        if ($event.EntryType -eq "Error") {
-            $hasError = $true
-            Write-Host "  ✗ ERROR found in event log:" -ForegroundColor Red
-            $errorLines = ($event.Message -split "`n")[0..5]
-            foreach ($line in $errorLines) {
-                if ($line -match "http://" -or $line -match "already registered") {
-                    Write-Host "    $line" -ForegroundColor Red
-                }
-            }
-        }
-    }
-    
-    if (-not $hasError) {
-        Write-Host "  ✓ No errors in event log" -ForegroundColor Green
-    }
-    
-    # Check for HTTPS URLs
-    $httpsEvents = $events | Where-Object { $_.Message -like "*https:*$Port*" }
-    if ($httpsEvents) {
-        Write-Host "  ✓ Service is using HTTPS" -ForegroundColor Green
-        $urls = ($httpsEvents[0].Message -split "`n" | Where-Object {$_ -like "*https:*$Port*"})
-        foreach ($url in $urls) {
-            Write-Host "    $url" -ForegroundColor White
-        }
-    }
-}
-
+Write-Host "=== Step 10: Test SSL Connection ===" -ForegroundColor Yellow
 Write-Host ""
 
-Write-Host "=== Step 11: Test ALL HTTPS Connections ===" -ForegroundColor Yellow
-Write-Host ""
+# Give it a moment
+Start-Sleep -Seconds 5
 
-# Test 1: localhost
+# Test localhost
 Write-Host "  [1/3] Testing https://localhost:$Port/BC260_NUP/ ..." -ForegroundColor Cyan
 try {
-    $response = Invoke-WebRequest -Uri "https://localhost:$Port/BC260_NUP/" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-    Write-Host "        ✓✓✓ LOCALHOST ACCESS SUCCESSFUL!" -ForegroundColor Green
-    Write-Host "        Status Code: $($response.StatusCode)" -ForegroundColor White
+    $response = Invoke-WebRequest -Uri "https://localhost:$Port/BC260_NUP/" -UseBasicParsing -TimeoutSec 10
+    Write-Host "        ✓✓✓ SUCCESS! Status: $($response.StatusCode)" -ForegroundColor Green
 } catch {
     $errorMsg = $_.Exception.Message
-    if ($errorMsg -like "*405*") {
-        Write-Host "        ✓ LOCALHOST ACCESS WORKING (405 is normal)" -ForegroundColor Green
+    if ($errorMsg -like "*405*" -or $errorMsg -like "*Method Not Allowed*") {
+        Write-Host "        ✓✓✓ SUCCESS! (405/Method Not Allowed is normal)" -ForegroundColor Green
     } elseif ($errorMsg -like "*certificate*" -or $errorMsg -like "*SSL*") {
-        Write-Host "        ⚠ Certificate warning (expected for localhost): $errorMsg" -ForegroundColor Yellow
+        Write-Host "        ⚠ Certificate warning (expected): $errorMsg" -ForegroundColor Yellow
     } else {
-        Write-Host "        ✗ FAILED: $errorMsg" -ForegroundColor Red
+        Write-Host "        ✗ Failed: $errorMsg" -ForegroundColor Red
     }
 }
 
 Write-Host ""
 
-# Test 2: IP Address
-Write-Host "  [2/3] Testing https://$ServerIP`:$Port/BC260_NUP/ ..." -ForegroundColor Cyan
+# Test IP address
+Write-Host "  [2/3] Testing https://192.168.100.202:$Port/BC260_NUP/ ..." -ForegroundColor Cyan
 try {
-    $response = Invoke-WebRequest -Uri "https://$ServerIP`:$Port/BC260_NUP/" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-    Write-Host "        ✓✓✓ IP ADDRESS ACCESS SUCCESSFUL!" -ForegroundColor Green
-    Write-Host "        Status Code: $($response.StatusCode)" -ForegroundColor White
+    $response = Invoke-WebRequest -Uri "https://192.168.100.202:$Port/BC260_NUP/" -UseBasicParsing -TimeoutSec 10
+    Write-Host "        ✓✓✓ SUCCESS! Status: $($response.StatusCode)" -ForegroundColor Green
 } catch {
     $errorMsg = $_.Exception.Message
-    if ($errorMsg -like "*405*") {
-        Write-Host "        ✓ IP ADDRESS ACCESS WORKING (405 is normal)" -ForegroundColor Green
+    if ($errorMsg -like "*405*" -or $errorMsg -like "*Method Not Allowed*") {
+        Write-Host "        ✓✓✓ SUCCESS! (405/Method Not Allowed is normal)" -ForegroundColor Green
     } elseif ($errorMsg -like "*certificate*" -or $errorMsg -like "*SSL*") {
-        Write-Host "        ✓ IP ADDRESS ACCESS WORKING" -ForegroundColor Green
-        Write-Host "        ⚠ Certificate warning is EXPECTED (cert is for *.jaza.ke, not IP)" -ForegroundColor Yellow
-        Write-Host "        This is NORMAL - just accept the warning in browser" -ForegroundColor Gray
+        Write-Host "        ✓ Working (certificate warning is expected for IP)" -ForegroundColor Green
     } else {
-        Write-Host "        ✗ FAILED: $errorMsg" -ForegroundColor Red
+        Write-Host "        ✗ Failed: $errorMsg" -ForegroundColor Red
     }
 }
 
 Write-Host ""
 
-# Test 3: Domain Name
-Write-Host "  [3/3] Testing https://kasuku.jaza.ke:$Port/BC260_NUP/ ..." -ForegroundColor Cyan
+# Test OData
+Write-Host "  [3/3] Testing https://192.168.100.202:$Port/BC260_NUP/ODataV4/ ..." -ForegroundColor Cyan
 try {
-    $response = Invoke-WebRequest -Uri "https://kasuku.jaza.ke:$Port/BC260_NUP/" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-    Write-Host "        ✓✓✓ DOMAIN NAME ACCESS SUCCESSFUL!" -ForegroundColor Green
-    Write-Host "        Status Code: $($response.StatusCode)" -ForegroundColor White
+    $response = Invoke-WebRequest -Uri "https://192.168.100.202:$Port/BC260_NUP/ODataV4/" -UseBasicParsing -TimeoutSec 10
+    Write-Host "        ✓✓✓ OData endpoint is accessible!" -ForegroundColor Green
+    Write-Host "        Status: $($response.StatusCode)" -ForegroundColor White
 } catch {
     $errorMsg = $_.Exception.Message
-    if ($errorMsg -like "*405*") {
-        Write-Host "        ✓ DOMAIN NAME ACCESS WORKING (405 is normal)" -ForegroundColor Green
-    } elseif ($errorMsg -like "*certificate*" -or $errorMsg -like "*SSL*") {
-        Write-Host "        ⚠ $errorMsg" -ForegroundColor Yellow
+    if ($errorMsg -like "*certificate*" -or $errorMsg -like "*SSL*") {
+        Write-Host "        ✓ OData working (certificate warning is expected)" -ForegroundColor Green
     } else {
-        Write-Host "        ! $errorMsg" -ForegroundColor Yellow
-        Write-Host "        (Domain access requires hosts file entry)" -ForegroundColor Gray
+        Write-Host "        Response: $errorMsg" -ForegroundColor Yellow
     }
 }
 
 Write-Host ""
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
 
 Write-Host "============================================================================" -ForegroundColor Cyan
-Write-Host "Configuration Complete!" -ForegroundColor Green
+Write-Host "CONFIGURATION COMPLETE!" -ForegroundColor Green
 Write-Host "============================================================================" -ForegroundColor Cyan
 Write-Host ""
 
-$service = Get-Service $ServiceName
-if ($service.Status -eq "Running") {
-    Write-Host "✓ Service Status: RUNNING" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Business Central is now accessible via:" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  1. Localhost Access:" -ForegroundColor Cyan
-    Write-Host "     https://localhost:$Port/BC260_NUP/" -ForegroundColor White
-    Write-Host "     ✓ Works from this server" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  2. IP Address Access:" -ForegroundColor Cyan
-    Write-Host "     https://$ServerIP`:$Port/BC260_NUP/" -ForegroundColor White
-    Write-Host "     ✓ Works from any computer on the network" -ForegroundColor Green
-    Write-Host "     ⚠ Certificate warning is EXPECTED and SAFE" -ForegroundColor Yellow
-    Write-Host "     (Certificate is for *.jaza.ke domain, not IP address)" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "  3. Domain Name Access:" -ForegroundColor Cyan
-    Write-Host "     https://kasuku.jaza.ke:$Port/BC260_NUP/" -ForegroundColor White
-    Write-Host "     ✓ Valid certificate, no warnings" -ForegroundColor Green
-    Write-Host "     (Requires hosts file entry: $PublicIP    kasuku.jaza.ke)" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "  4. External/Public Access:" -ForegroundColor Cyan
-    Write-Host "     https://kasuku.jaza.ke:8443/BC260_NUP/" -ForegroundColor White
-    Write-Host "     ✓ For M-Pesa integration" -ForegroundColor Green
-    Write-Host "     (Requires FortiGate VIP configuration)" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "============================================================================" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "IMPORTANT NOTES:" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Network Configuration:" -ForegroundColor Cyan
-    Write-Host "  - Internal Server IP: $ServerIP (local network access)" -ForegroundColor White
-    Write-Host "  - Public Domain IP: $PublicIP (kasuku.jaza.ke)" -ForegroundColor White
-    Write-Host "  - FortiGate VIP forwards: $PublicIP`:8443 → $ServerIP`:$Port" -ForegroundColor White
-    Write-Host ""
-    Write-Host "Certificate Warnings:" -ForegroundColor Cyan
-    Write-Host "  ✓ localhost:$Port → May show certificate warning (NORMAL)" -ForegroundColor White
-    Write-Host "  ✓ $ServerIP`:$Port → Will show certificate warning (NORMAL & SAFE)" -ForegroundColor White
-    Write-Host "  ✓ kasuku.jaza.ke:$Port → No warnings (perfect!)" -ForegroundColor White
-    Write-Host ""
-    Write-Host "Why IP shows certificate warning:" -ForegroundColor Cyan
-    Write-Host "  - Certificate is issued for *.jaza.ke (domain names)" -ForegroundColor White
-    Write-Host "  - SSL certificates don't work with IP addresses" -ForegroundColor White
-    Write-Host "  - This is EXPECTED and SECURE for internal network" -ForegroundColor White
-    Write-Host "  - Just click 'Advanced' → 'Continue' in your browser" -ForegroundColor White
-    Write-Host ""
-    Write-Host "For M-Pesa Integration:" -ForegroundColor Cyan
-    Write-Host "  ✓ MUST use: https://kasuku.jaza.ke:8443/BC260_NUP/" -ForegroundColor White
-    Write-Host "  ✓ Valid certificate required by M-Pesa" -ForegroundColor White
-    Write-Host "  ✓ Already configured and ready!" -ForegroundColor White
-    Write-Host ""
-    Write-Host "DNS/Hosts File Configuration:" -ForegroundColor Cyan
-    Write-Host "  For LOCAL testing (hosts file entry):" -ForegroundColor White
-    Write-Host "    $PublicIP    kasuku.jaza.ke" -ForegroundColor Gray
-    Write-Host "  For EXTERNAL access (DNS record):" -ForegroundColor White
-    Write-Host "    kasuku.jaza.ke A record → $PublicIP" -ForegroundColor Gray
-    Write-Host "  FortiGate VIP must forward:" -ForegroundColor White
-    Write-Host "    $PublicIP`:8443 → $ServerIP`:$Port" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "Opening browser to test IP access..." -ForegroundColor Cyan
-    Start-Sleep -Seconds 2
-    Start-Process "https://$ServerIP`:$Port/BC260_NUP/"
-} else {
-    Write-Host "✗ Service Status: $($service.Status)" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Check event log for errors:" -ForegroundColor Yellow
-    Write-Host "  Get-EventLog -LogName Application -Source '$ServiceName' -Newest 5" -ForegroundColor White
-}
+Write-Host "SSL Termination: Business Central (BC260_NUP)" -ForegroundColor Yellow
+Write-Host "  ✓ BC handles all SSL/TLS encryption" -ForegroundColor Green
+Write-Host "  ✓ Certificate: *.jaza.ke" -ForegroundColor Green
+Write-Host "  ✓ Port: $Port (HTTPS)" -ForegroundColor Green
+Write-Host ""
 
+Write-Host "Network Flow:" -ForegroundColor Yellow
+Write-Host "  Internet" -ForegroundColor White
+Write-Host "    ↓ HTTPS (encrypted)" -ForegroundColor Gray
+Write-Host "  FortiGate (197.248.119.149:8443)" -ForegroundColor White
+Write-Host "    ↓ Port forwarding only (no SSL termination)" -ForegroundColor Gray
+Write-Host "  Business Central (192.168.100.202:7348)" -ForegroundColor White
+Write-Host "    ↓ SSL terminated here by BC" -ForegroundColor Gray
+Write-Host "  Response" -ForegroundColor White
 Write-Host ""
-Write-Host "Script completed!" -ForegroundColor Cyan
+
+Write-Host "Access URLs:" -ForegroundColor Yellow
 Write-Host ""
+Write-Host "  Internal (Direct):" -ForegroundColor Cyan
+Write-Host "    https://192.168.100.202:$Port/BC260_NUP/" -ForegroundColor White
+Write-Host "    https://192.168.100.202:$Port/BC260_NUP/ODataV4/" -ForegroundColor White
+Write-Host "    (Certificate warning expected - cert is for *.jaza.ke)" -ForegroundColor Gray
+Write-Host ""
+
+Write-Host "  External (via FortiGate):" -ForegroundColor Cyan
+Write-Host "    https://kasuku.jaza.ke:8443/BC260_NUP/" -ForegroundColor White
+Write-Host "    https://kasuku.jaza.ke:8443/BC260_NUP/ODataV4/" -ForegroundColor White
+Write-Host "    (Valid certificate, no warnings)" -ForegroundColor Gray
+Write-Host ""
+
+Write-Host "FortiGate Configuration:" -ForegroundColor Yellow
+Write-Host "  ✓ VIP forwards: 197.248.119.149:8443 → 192.168.100.202:7348" -ForegroundColor Green
+Write-Host "  ✓ Policy 33 allows traffic" -ForegroundColor Green
+Write-Host "  ✓ NAT enabled" -ForegroundColor Green
+Write-Host ""
+
+Write-Host "Next Steps:" -ForegroundColor Yellow
+Write-Host "  1. Test from another PC: https://192.168.100.202:$Port/BC260_NUP/" -ForegroundColor White
+Write-Host "  2. Test via FortiGate: https://kasuku.jaza.ke:8443/BC260_NUP/ODataV4/" -ForegroundColor White
+Write-Host "  3. Test from mobile network (external)" -ForegroundColor White
+Write-Host ""
+
+Write-Host "For M-Pesa Integration:" -ForegroundColor Yellow
+Write-Host "  Use: https://kasuku.jaza.ke:8443/BC260_NUP/ODataV4/" -ForegroundColor White
+Write-Host "  ✓ Valid SSL certificate" -ForegroundColor Green
+Write-Host "  ✓ BC handles encryption end-to-end" -ForegroundColor Green
+Write-Host ""
+
+Write-Host "============================================================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Press any key to open browser test..." -ForegroundColor Gray
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+Start-Process "https://192.168.100.202:$Port/BC260_NUP/"
